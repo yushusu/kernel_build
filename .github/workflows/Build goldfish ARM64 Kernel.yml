@@ -13,9 +13,9 @@ on:
         required: false
         default: '182a76ba7053af521e4c0d5fd62134f1e323191d'
       defconfig:
-        description: 'defconfig to use (kernel config).'
+        description: 'defconfig to use (kernel config). Leave empty to auto-detect.'
         required: false
-        default: 'goldfish_defconfig'
+        default: ''
       use_clang:
         description: 'Set to "true" to build with clang (if supported).'
         required: false
@@ -62,19 +62,59 @@ jobs:
           fi
           sudo apt-get install -y android-tools-adb android-tools-fastboot u-boot-tools || true
 
-      - name: Configure build variables
-        run: |
-          echo "DEFCONFIG=${{ github.event.inputs.defconfig }}"
-          echo "USE_CLANG=${{ github.event.inputs.use_clang }}"
-          echo "DEFCONFIG=${{ github.event.inputs.defconfig }}" >> $GITHUB_ENV
-          echo "USE_CLANG=${{ github.event.inputs.use_clang }}" >> $GITHUB_ENV
-
-      - name: Prepare kernel build (defconfig)
+      - name: Detect defconfig and prepare build
         working-directory: kernel-src
         run: |
           set -e
-          echo "Running make O=out ARCH=${ARCH} ${DEFCONFIG}"
-          make O=out ARCH=${ARCH} ${DEFCONFIG}
+          echo "Detecting available defconfig files..."
+          AVAILABLE=$(git ls-files 'arch/*/configs/*' | sed 's|.*/configs/||' | sort -u || true)
+          echo "Available defconfigs:"
+          echo "$AVAILABLE" || true
+
+          if [ -z "$AVAILABLE" ]; then
+            echo "No defconfigs found under arch/*/configs. Listing arch/ directory:"
+            ls -la arch || true
+            echo "This kernel tree may not support ARCH=${ARCH}; consider changing ARCH to 'arm' or using a different branch."
+            exit 1
+          fi
+
+          REQUESTED="${{ github.event.inputs.defconfig }}"
+          echo "Requested defconfig: ${REQUESTED}"
+
+          if [ -n "$REQUESTED" ] && echo "$AVAILABLE" | grep -x -q "$REQUESTED"; then
+            CHOSEN="$REQUESTED"
+            echo "Using requested defconfig: $CHOSEN"
+          else
+            CHOSEN=$(echo "$AVAILABLE" | grep -i goldfish | head -n1 || true)
+            if [ -n "$CHOSEN" ]; then
+              echo "Auto-detected goldfish defconfig: $CHOSEN"
+            else
+              CHOSEN=$(echo "$AVAILABLE" | grep -i virt | head -n1 || true)
+              if [ -n "$CHOSEN" ]; then
+                echo "Using virt fallback defconfig: $CHOSEN"
+              else
+                CHOSEN=$(echo "$AVAILABLE" | head -n1)
+                echo "No goldfish/virt defconfig found; using first available: $CHOSEN"
+              fi
+            fi
+          fi
+
+          echo "FINAL_DEFCONFIG=$CHOSEN" >> $GITHUB_ENV
+          echo "Detected/selected DEFCONFIG=$CHOSEN"
+
+      - name: Run make defconfig and show config location
+        working-directory: kernel-src
+        run: |
+          set -e
+          echo "Using ARCH=${ARCH}"
+          echo "Running make O=out ARCH=${ARCH} ${FINAL_DEFCONFIG}"
+          if ! make O=out ARCH=${ARCH} ${FINAL_DEFCONFIG}; then
+            echo "make ${FINAL_DEFCONFIG} failed. Available defconfigs were:"
+            git ls-files 'arch/*/configs/*' | sed 's|.*/configs/||' | sort -u || true
+            echo "Listing arch directory:"
+            ls -la arch || true
+            exit 2
+          fi
 
       - name: Build kernel Image
         working-directory: kernel-src
@@ -107,13 +147,10 @@ jobs:
         if: always()
         run: |
           set -e
-          # Create minimal initramfs without shebang lines and without heredoc
           mkdir -p work/ramdisk/root
-          # create a simple init script (no shebang)
           printf '%s\n' 'echo "Booted minimal ramdisk"' 'exec /bin/sh || exec /sbin/sh || true' > work/ramdisk/root/init
           chmod +x work/ramdisk/root/init
           (cd work/ramdisk/root && find . | cpio -o -H newc) | gzip -9 > work/ramdisk/ramdisk.cpio.gz
-          # Generate boot.img if mkbootimg exists (may not be available)
           if command -v mkbootimg >/dev/null 2>&1; then
             echo "Found mkbootimg, creating boot.img"
             mkbootimg --kernel artifacts/Image --ramdisk work/ramdisk/ramdisk.cpio.gz --output artifacts/boot.img || true
