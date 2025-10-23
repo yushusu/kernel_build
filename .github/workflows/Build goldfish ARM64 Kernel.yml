@@ -16,7 +16,7 @@ on:
       defconfig:
         description: 'defconfig to use (kernel config).'
         required: false
-        default: 'goldfish_defconfig'  # 如需换成其他 defconfig，请修改
+        default: 'goldfish_defconfig'
       use_clang:
         description: 'Set to "true" to build with clang (if supported).'
         required: false
@@ -31,116 +31,111 @@ jobs:
       MAKEFLAGS: -j$(nproc)
 
     steps:
-    - name: Checkout this workflow repo
-      uses: actions/checkout@v4
+      - name: Checkout this workflow repo
+        uses: actions/checkout@v4
 
-    - name: Clone kernel repo
-      run: |
-        REPO="${{ github.event.inputs.kernel_repo }}"
-        REF="${{ github.event.inputs.commit }}"
-        echo "Cloning ${REPO} ..."
-        rm -rf kernel-src
-        git clone --depth=1 "${REPO}" kernel-src || (git clone "${REPO}" kernel-src)
-        pushd kernel-src
-        if [ -n "$REF" ]; then
-          # fetch full history to allow checking out arbitrary sha if depth=1 clone failed
-          git fetch --all --tags || true
-          if ! git checkout "$REF" 2>/dev/null; then
-            git checkout --detach "$REF" || true
+      - name: Clone kernel repo
+        run: |
+          REPO="${{ github.event.inputs.kernel_repo }}"
+          REF="${{ github.event.inputs.commit }}"
+          echo "Cloning ${REPO} ..."
+          rm -rf kernel-src
+          git clone --depth=1 "${REPO}" kernel-src || git clone "${REPO}" kernel-src
+          pushd kernel-src
+          if [ -n "$REF" ]; then
+            # fetch full history to allow checking out arbitrary sha if depth=1 clone failed
+            git fetch --all --tags || true
+            if ! git checkout "$REF" 2>/dev/null; then
+              git checkout --detach "$REF" || true
+            fi
           fi
-        fi
-        echo "Checked kernel ref:"
-        git rev-parse --verify HEAD
-        git log -1 --oneline
-        popd
+          echo "Checked kernel ref:"
+          git rev-parse --verify HEAD
+          git log -1 --oneline
+          popd
 
-    - name: Install build deps and toolchain
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential bc bison flex cpio device-tree-compiler libncurses-dev git
-        # Install aarch64 cross gcc (useful fallback if not using clang)
-        sudo apt-get install -y gcc-aarch64-linux-gnu
-        # Install clang if requested (a recent clang is usually fine for Android kernels)
-        if [ "${{ github.event.inputs.use_clang }}" = "true" ]; then
-          sudo apt-get install -y clang
-        fi
-        # mkbootimg is not always available in apt; try to install android-tools if present
-        sudo apt-get install -y android-tools-adb android-tools-fastboot || true
-        # u-boot-tools provides mkimage (not mkbootimg), but keep it for convenience
-        sudo apt-get install -y u-boot-tools || true
+      - name: Install build deps and toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex cpio device-tree-compiler libncurses-dev git
+          # Install aarch64 cross gcc (useful fallback if not using clang)
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          # Install clang if requested
+          if [ "${{ github.event.inputs.use_clang }}" = "true" ]; then
+            sudo apt-get install -y clang
+          fi
+          # Try to install helpful tools (mkbootimg may not be available from apt)
+          sudo apt-get install -y android-tools-adb android-tools-fastboot u-boot-tools || true
 
-    - name: Configure build variables
-      run: |
-        echo "DEFCONFIG=${{ github.event.inputs.defconfig }}"
-        echo "USE_CLANG=${{ github.event.inputs.use_clang }}"
-        # Export to job environment
-        echo "DEFCONFIG=${{ github.event.inputs.defconfig }}" >> $GITHUB_ENV
-        echo "USE_CLANG=${{ github.event.inputs.use_clang }}" >> $GITHUB_ENV
+      - name: Configure build variables
+        run: |
+          echo "DEFCONFIG=${{ github.event.inputs.defconfig }}"
+          echo "USE_CLANG=${{ github.event.inputs.use_clang }}"
+          echo "DEFCONFIG=${{ github.event.inputs.defconfig }}" >> $GITHUB_ENV
+          echo "USE_CLANG=${{ github.event.inputs.use_clang }}" >> $GITHUB_ENV
 
-    - name: Prepare kernel build (defconfig)
-      working-directory: kernel-src
-      run: |
-        set -e
-        # Use an out-of-tree build dir to keep source clean
-        echo "Running make O=out ARCH=${ARCH} ${DEFCONFIG}"
-        make O=out ARCH=${ARCH} ${DEFCONFIG}
+      - name: Prepare kernel build (defconfig)
+        working-directory: kernel-src
+        run: |
+          set -e
+          echo "Running make O=out ARCH=${ARCH} ${DEFCONFIG}"
+          make O=out ARCH=${ARCH} ${DEFCONFIG}
 
-    - name: Build kernel Image
-      working-directory: kernel-src
-      run: |
-        set -e
-        mkdir -p ../artifacts
-        if [ "${USE_CLANG}" = "true" ]; then
-          echo "Building with clang"
-          make -j$(nproc) O=out ARCH=${ARCH} CC=clang Image || make -j2 O=out ARCH=${ARCH} CC=clang Image
-        else
-          echo "Building with cross gcc (${CROSS_COMPILE})"
-          make -j$(nproc) O=out ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} Image || make -j2 O=out ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} Image
-        fi
-        # The typical output path for arm64 is out/arch/arm64/boot/Image
-        if [ -f out/arch/arm64/boot/Image ]; then
-          cp out/arch/arm64/boot/Image ../artifacts/Image
-        else
-          echo "ERROR: kernel Image not found at out/arch/arm64/boot/Image"
-          ls -R out || true
-          exit 2
-        fi
-        ls -l ../artifacts
+      - name: Build kernel Image
+        working-directory: kernel-src
+        run: |
+          set -e
+          mkdir -p ../artifacts
+          if [ "${USE_CLANG}" = "true" ]; then
+            echo "Building with clang"
+            make -j$(nproc) O=out ARCH=${ARCH} CC=clang Image || make -j2 O=out ARCH=${ARCH} CC=clang Image
+          else
+            echo "Building with cross gcc (${CROSS_COMPILE})"
+            make -j$(nproc) O=out ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} Image || make -j2 O=out ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} Image
+          fi
+          if [ -f out/arch/arm64/boot/Image ]; then
+            cp out/arch/arm64/boot/Image ../artifacts/Image
+          else
+            echo "ERROR: kernel Image not found at out/arch/arm64/boot/Image"
+            ls -R out || true
+            exit 2
+          fi
+          ls -l ../artifacts
 
-    - name: Create Image.gz
-      run: |
-        mkdir -p artifacts
-        gzip -n -9 -c artifacts/Image > artifacts/Image.gz
-        ls -lh artifacts
+      - name: Create Image.gz
+        run: |
+          mkdir -p artifacts
+          gzip -n -9 -c artifacts/Image > artifacts/Image.gz
+          ls -lh artifacts
 
-    - name: (Optional) Build minimal ramdisk and mkbootimg -> boot.img
-      if: always()
-      run: |
-        set -e
-        # Create minimal initramfs (use a real android ramdisk if you have one)
-        mkdir -p work/ramdisk/root
-        cat > work/ramdisk/root/init <<'INIT'
+      - name: (Optional) Build minimal ramdisk and mkbootimg -> boot.img
+        if: always()
+        run: |
+          set -e
+          # Create minimal initramfs (use a real android ramdisk if you have one)
+          mkdir -p work/ramdisk/root
+          cat > work/ramdisk/root/init <<'INIT'
 #!/bin/sh
 echo "Booted minimal ramdisk"
 exec /bin/sh || exec /sbin/sh || true
 INIT
-        chmod +x work/ramdisk/root/init
-        (cd work/ramdisk/root && find . | cpio -o -H newc) | gzip -9 > work/ramdisk/ramdisk.cpio.gz
-        # Try to find mkbootimg (not always available). If not found, skip boot.img
-        if command -v mkbootimg >/dev/null 2>&1; then
-          echo "Found mkbootimg, creating boot.img"
-          mkbootimg --kernel artifacts/Image --ramdisk work/ramdisk/ramdisk.cpio.gz --output artifacts/boot.img || true
-        else
-          echo "mkbootimg not found; skipping boot.img generation. You can supply your own mkbootimg or use AOSP host tools."
-        fi
-        ls -l artifacts || true
+          chmod +x work/ramdisk/root/init
+          (cd work/ramdisk/root && find . | cpio -o -H newc) | gzip -9 > work/ramdisk/ramdisk.cpio.gz
+          # Try to find mkbootimg (not always available). If not found, skip boot.img
+          if command -v mkbootimg >/dev/null 2>&1; then
+            echo "Found mkbootimg, creating boot.img"
+            mkbootimg --kernel artifacts/Image --ramdisk work/ramdisk/ramdisk.cpio.gz --output artifacts/boot.img || true
+          else
+            echo "mkbootimg not found; skipping boot.img generation. You can supply your own mkbootimg or use AOSP host tools."
+          fi
+          ls -l artifacts || true
 
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-artifacts
-        path: artifacts/*
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: artifacts/*
 
-    - name: Print final locations
-      run: |
-        echo "Artifacts uploaded: Image.gz (required), boot.img (optional if created)."
+      - name: Print final locations
+        run: |
+          echo "Artifacts uploaded: Image.gz (required), boot.img (optional if created)."
