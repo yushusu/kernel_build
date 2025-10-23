@@ -1,5 +1,4 @@
-# Workflow: 从 android.googlesource 的 goldfish 内核仓库克隆并为 ARM64 构建 Image.gz（可选生成 boot.img）。
-# 默认 checkout 的 commit 为 182a76ba7053af521e4c0d5fd62134f1e323191d（可通过 Run workflow 修改）。
+# Build goldfish ARM64 kernel (clone android.googlesource, checkout given ref, build Image -> Image.gz, optional boot.img)
 name: Build goldfish ARM64 Kernel
 
 on:
@@ -43,7 +42,6 @@ jobs:
           git clone --depth=1 "${REPO}" kernel-src || git clone "${REPO}" kernel-src
           pushd kernel-src
           if [ -n "$REF" ]; then
-            # fetch full history to allow checking out arbitrary sha if depth=1 clone failed
             git fetch --all --tags || true
             if ! git checkout "$REF" 2>/dev/null; then
               git checkout --detach "$REF" || true
@@ -58,13 +56,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex cpio device-tree-compiler libncurses-dev git
-          # Install aarch64 cross gcc (useful fallback if not using clang)
           sudo apt-get install -y gcc-aarch64-linux-gnu
-          # Install clang if requested
           if [ "${{ github.event.inputs.use_clang }}" = "true" ]; then
             sudo apt-get install -y clang
           fi
-          # Try to install helpful tools (mkbootimg may not be available from apt)
           sudo apt-get install -y android-tools-adb android-tools-fastboot u-boot-tools || true
 
       - name: Configure build variables
@@ -112,21 +107,18 @@ jobs:
         if: always()
         run: |
           set -e
-          # Create minimal initramfs (use a real android ramdisk if you have one)
+          # Create minimal initramfs without shebang lines and without heredoc
           mkdir -p work/ramdisk/root
-          cat > work/ramdisk/root/init <<'INIT'
-#!/bin/sh
-echo "Booted minimal ramdisk"
-exec /bin/sh || exec /sbin/sh || true
-INIT
+          # create a simple init script (no shebang)
+          printf '%s\n' 'echo "Booted minimal ramdisk"' 'exec /bin/sh || exec /sbin/sh || true' > work/ramdisk/root/init
           chmod +x work/ramdisk/root/init
           (cd work/ramdisk/root && find . | cpio -o -H newc) | gzip -9 > work/ramdisk/ramdisk.cpio.gz
-          # Try to find mkbootimg (not always available). If not found, skip boot.img
+          # Generate boot.img if mkbootimg exists (may not be available)
           if command -v mkbootimg >/dev/null 2>&1; then
             echo "Found mkbootimg, creating boot.img"
             mkbootimg --kernel artifacts/Image --ramdisk work/ramdisk/ramdisk.cpio.gz --output artifacts/boot.img || true
           else
-            echo "mkbootimg not found; skipping boot.img generation. You can supply your own mkbootimg or use AOSP host tools."
+            echo "mkbootimg not found; skipping boot.img generation."
           fi
           ls -l artifacts || true
 
